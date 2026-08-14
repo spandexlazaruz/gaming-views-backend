@@ -1,0 +1,6 @@
+{
+  "name": "gaming-views-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless backend for Gaming Views - proxies IGDB requests and keeps credentials off the client."
+}
