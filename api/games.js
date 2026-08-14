@@ -70,13 +70,9 @@ module.exports = async function handler(req, res) {
     const oneYearOut = nowUnix + 60 * 60 * 24 * 365;
 
     // IGDB's query language (Apicalypse) — plain text, not JSON.
-    // category = (0,8,9,10,11) → main games, remakes, remasters, expanded games,
-    // and ports only. Excludes DLC (1), expansions (2), mods (5), episodes (6),
-    // seasons (7), and updates (14), which otherwise flood the results with
-    // small releases and push real games out past the limit.
     const query = `
       fields name, first_release_date, platforms.name, genres.name, summary, cover.url;
-      where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null & category = (0,8,9,10,11);
+      where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
       sort first_release_date asc;
       limit 500;
     `;
