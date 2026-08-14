@@ -69,30 +69,51 @@ module.exports = async function handler(req, res) {
     const nowUnix = Math.floor(Date.now() / 1000);
     const oneYearOut = nowUnix + 60 * 60 * 24 * 365;
 
-    // IGDB's query language (Apicalypse) — plain text, not JSON.
-    const query = `
-      fields name, first_release_date, platforms.name, genres.name, summary, cover.url;
-      where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
-      sort first_release_date asc;
-      limit 500;
-    `;
+    // IGDB caps each request at 500 results. With no filter on release type
+    // (DLC, mobile ports, and small indie titles all count equally toward
+    // that cap), a full year's worth of releases can easily exceed 500
+    // entries before reaching a late-in-the-window title like a big AAA
+    // release announced for the fall. So: page through results instead of
+    // taking just the first batch, up to a generous cap.
+    const PAGE_SIZE = 500;
+    const MAX_PAGES = 4; // up to 2000 games — comfortably covers a year, well within Vercel's execution limits
+    let rawGames = [];
 
-    const igdbResponse = await fetch('https://api.igdb.com/v4/games', {
-      method: 'POST',
-      headers: {
-        'Client-ID': clientId,
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'text/plain',
-      },
-      body: query,
-    });
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const offset = page * PAGE_SIZE;
+      const query = `
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url;
+        where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
+        sort first_release_date asc;
+        limit ${PAGE_SIZE};
+        offset ${offset};
+      `;
 
-    if (!igdbResponse.ok) {
-      const detail = await igdbResponse.text();
-      return res.status(502).json({ error: 'IGDB request failed', detail });
+      const igdbResponse = await fetch('https://api.igdb.com/v4/games', {
+        method: 'POST',
+        headers: {
+          'Client-ID': clientId,
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'text/plain',
+        },
+        body: query,
+      });
+
+      if (!igdbResponse.ok) {
+        const detail = await igdbResponse.text();
+        // If we already got some pages successfully, use what we have rather
+        // than failing the whole request over one bad page.
+        if (rawGames.length > 0) break;
+        return res.status(502).json({ error: 'IGDB request failed', detail });
+      }
+
+      const pageGames = await igdbResponse.json();
+      rawGames = rawGames.concat(pageGames);
+
+      // Fewer results than a full page means we've reached the end — no need
+      // to keep paging.
+      if (pageGames.length < PAGE_SIZE) break;
     }
-
-    const rawGames = await igdbResponse.json();
 
     const games = rawGames
       .map((g) => {
