@@ -53,6 +53,40 @@ function mapPlatform(name) {
   return null;
 }
 
+// Folds IGDB's ~20 specific genres down into a short, curated list —
+// showing every raw genre as its own filter chip would be exactly the kind
+// of overwhelming choice this app is deliberately avoiding. Anything not
+// explicitly mapped falls under "Other" rather than being dropped.
+const GENRE_CATEGORY_MAP = {
+  'shooter': 'Shooter',
+  'fighting': 'Action',
+  'hack and slash/beat \'em up': 'Action',
+  'platform': 'Action',
+  'arcade': 'Action',
+  'adventure': 'Adventure',
+  'point-and-click': 'Adventure',
+  'visual novel': 'Adventure',
+  'role-playing (rpg)': 'RPG',
+  'strategy': 'Strategy',
+  'real time strategy (rts)': 'Strategy',
+  'turn-based strategy (tbs)': 'Strategy',
+  'tactical': 'Strategy',
+  'moba': 'Strategy',
+  'sport': 'Sports & Racing',
+  'racing': 'Sports & Racing',
+  'simulator': 'Simulation & Puzzle',
+  'puzzle': 'Simulation & Puzzle',
+  'quiz/trivia': 'Simulation & Puzzle',
+  'card & board game': 'Simulation & Puzzle',
+  'pinball': 'Simulation & Puzzle',
+  'music': 'Simulation & Puzzle',
+};
+
+function mapGenreCategory(rawGenre) {
+  if (!rawGenre) return 'Other';
+  return GENRE_CATEGORY_MAP[rawGenre.toLowerCase()] || 'Other';
+}
+
 function toCoverUrl(rawUrl) {
   if (!rawUrl) return null;
   // IGDB gives protocol-relative thumbnail URLs by default (e.g. //images.igdb.com/...t_thumb...).
@@ -124,12 +158,14 @@ module.exports = async function handler(req, res) {
 
         const date = new Date(g.first_release_date * 1000);
         const genre = g.genres && g.genres.length > 0 ? g.genres[0].name : 'Adventure';
+        const genreCategory = mapGenreCategory(genre);
 
         return {
           title: g.name,
           date: [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()],
           platforms,
           genre,
+          genreCategory,
           desc: g.summary ? g.summary.slice(0, 220) : null,
           coverUrl: toCoverUrl(g.cover && g.cover.url),
         };
