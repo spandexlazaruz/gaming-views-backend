@@ -1,3 +1,5 @@
+const Sentry = require('../lib/sentry');
+
 // In-memory cache for the Twitch access token. Persists across "warm"
 // invocations of this function on Vercel, so we're not re-authenticating
 // on every single request.
@@ -138,6 +140,8 @@ module.exports = async function handler(req, res) {
         // If we already got some pages successfully, use what we have rather
         // than failing the whole request over one bad page.
         if (rawGames.length > 0) break;
+        Sentry.captureException(new Error(`IGDB request failed (${igdbResponse.status}): ${detail}`));
+        await Sentry.flush(2000);
         return res.status(502).json({ error: 'IGDB request failed', detail });
       }
 
@@ -177,6 +181,8 @@ module.exports = async function handler(req, res) {
     res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
     return res.status(200).json({ games, count: games.length });
   } catch (err) {
+    Sentry.captureException(err);
+    await Sentry.flush(2000);
     return res.status(500).json({ error: err.message });
   }
 };
