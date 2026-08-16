@@ -112,7 +112,16 @@ module.exports = async function handler(req, res) {
     // release announced for the fall. So: page through results instead of
     // taking just the first batch, up to a generous cap.
     const PAGE_SIZE = 500;
-    const MAX_PAGES = 4; // up to 2000 games — comfortably covers a year, well within Vercel's execution limits
+    // 4 pages (2000 games) turned out not to cover a full year — actual
+    // release volume across ps/xbox/switch/pc is denser than that, so the
+    // fetch was hitting this cap and silently cutting off mid-year instead
+    // of reaching the full 12-month window the query below asks for. Raised
+    // well above the real expected total so the loop's own early-exit below
+    // (a page returning fewer than PAGE_SIZE results) is what actually stops
+    // it, not this number. Vercel Pro's function duration (300s default,
+    // extendable) comfortably covers even the worst case of paging all the
+    // way to this cap.
+    const MAX_PAGES = 20; // backstop only — up to 10,000 games
     let rawGames = [];
 
     for (let page = 0; page < MAX_PAGES; page++) {
