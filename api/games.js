@@ -97,6 +97,23 @@ function toCoverUrl(rawUrl) {
   return upgraded.startsWith('//') ? `https:${upgraded}` : upgraded;
 }
 
+// A hard `.slice(0, DESC_LIMIT)` cuts mid-word/mid-sentence with no visual
+// sign it happened — on the game detail screen, that truncated text used to
+// run straight into a fixed marketing sentence with nothing but a single
+// space between them, reading like the marketing sentence was "covering"
+// the end of the description. Backing off to the last whitespace before the
+// limit, and adding an ellipsis only when a real cut happened, fixes the
+// backend half of that (see app/game/[title].js for the frontend half).
+const DESC_LIMIT = 220;
+function truncateSummary(summary) {
+  if (!summary) return null;
+  if (summary.length <= DESC_LIMIT) return summary;
+  const slice = summary.slice(0, DESC_LIMIT);
+  const lastSpace = slice.lastIndexOf(' ');
+  const trimmed = (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).trim();
+  return `${trimmed}…`;
+}
+
 module.exports = async function handler(req, res) {
   try {
     const token = await getAccessToken();
@@ -179,7 +196,7 @@ module.exports = async function handler(req, res) {
           platforms,
           genre,
           genreCategory,
-          desc: g.summary ? g.summary.slice(0, 220) : null,
+          desc: truncateSummary(g.summary),
           coverUrl: toCoverUrl(g.cover && g.cover.url),
         };
       })
