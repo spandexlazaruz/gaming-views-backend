@@ -181,7 +181,13 @@ module.exports = async function handler(req, res) {
 
     const games = rawGames
       .map((g) => {
-        if (!g.first_release_date || !g.platforms) return null;
+        // A record with no title (`g.name`) used to slip through here and
+        // crash on an `undefined` title downstream — `app/search.js`'s
+        // `g.title.toLowerCase()` filter and `lib/theme.js`'s
+        // `hashStr(game.title)` (called by GameCard on every card) both
+        // assume a real string. Not the cause of the real crash this project
+        // hit (see fix log item 8), but a real, cheap gap worth closing.
+        if (!g.name || !g.first_release_date || !g.platforms) return null;
 
         const platforms = [...new Set(g.platforms.map((p) => mapPlatform(p.name)).filter(Boolean))];
         if (platforms.length === 0) return null; // skip games on platforms we don't track
