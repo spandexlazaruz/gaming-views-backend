@@ -92,8 +92,14 @@ function mapGenreCategory(rawGenre) {
 function toCoverUrl(rawUrl) {
   if (!rawUrl) return null;
   // IGDB gives protocol-relative thumbnail URLs by default (e.g. //images.igdb.com/...t_thumb...).
-  // Upgrade to a larger size and add the protocol.
-  const upgraded = rawUrl.replace('t_thumb', 't_cover_big');
+  // Upgrade to a larger size and add the protocol. t_cover_big (~227x320) was
+  // a low ceiling for the full-width hero image on the game detail screen,
+  // especially on higher-density phone screens — t_1080p is IGDB's larger
+  // template and applies to cover images too, not just screenshots. Trade-off
+  // is more bandwidth per image load across every screen that renders a
+  // cover (Calendar, Watchlist, Search, detail hero) — accepted deliberately,
+  // not a bug fix (see fix log item 12).
+  const upgraded = rawUrl.replace('t_thumb', 't_1080p');
   return upgraded.startsWith('//') ? `https:${upgraded}` : upgraded;
 }
 
