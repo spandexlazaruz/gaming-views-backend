@@ -132,11 +132,23 @@ function toStoreLinks(externalGames) {
 // it. If platforms have differing release dates that should be shown").
 // Multiple regions can list the same platform — keep the earliest real date
 // per platform rather than picking one region arbitrarily.
-function buildPlatformDates(releaseDates) {
+//
+// `nowUnix` is required — this is a forward-looking release tracker, and a
+// game can easily have OLD release_dates entries alongside a genuinely
+// upcoming one (e.g. an original 2018 PC release plus a newly-confirmed 2026
+// PS5 remaster). Without excluding those, the game's aggregate `date` below
+// gets computed as the *earliest* platform date — pulling a game with a real
+// 2026 release backward to 2018, and surfacing a stale "Aug 2018" chip in
+// the Calendar's month filter (found on-device 2026-08-18: old months
+// showing back to 2018 in what's meant to be an upcoming-releases tracker).
+// A platform whose only known date has already passed is treated the same
+// as "not confirmed" for this app's purposes — it's simply not upcoming.
+function buildPlatformDates(releaseDates, nowUnix) {
   if (!releaseDates || releaseDates.length === 0) return null;
   const byPlatform = {};
   for (const rd of releaseDates) {
     if (!rd.date) continue; // no confirmed date yet — skip, don't guess
+    if (rd.date <= nowUnix) continue; // already released — not upcoming, don't let it anchor the game's date
     const key = rd.platform && rd.platform.name ? mapPlatform(rd.platform.name) : null;
     if (!key) continue;
     if (!byPlatform[key] || rd.date < byPlatform[key]) byPlatform[key] = rd.date;
@@ -258,7 +270,7 @@ module.exports = async function handler(req, res) {
         // IGDB doesn't have granular data for a game — common for smaller/
         // less-tracked titles — so a game is never dropped or platform-
         // stripped just because the richer data isn't there yet.
-        const platformDates = buildPlatformDates(g.release_dates);
+        const platformDates = buildPlatformDates(g.release_dates, nowUnix);
 
         let platforms, date;
         if (platformDates) {
