@@ -121,6 +121,29 @@ function toStoreLinks(externalGames) {
   return links;
 }
 
+// Per-platform release dates — separate from `platforms`/`first_release_date`
+// above. IGDB's release_dates sub-resource carries one entry per
+// platform+region combination, each with its own `date`. When a platform's
+// date genuinely isn't confirmed yet, IGDB simply has no real `date` value
+// for that entry — checking for that directly (rather than trying to match
+// an exact "TBD" category enum value, which isn't reliably documented) is
+// the safest signal for "don't show this platform yet" (fix request:
+// "I do not want to see platforms showing when a date is not confirmed for
+// it. If platforms have differing release dates that should be shown").
+// Multiple regions can list the same platform — keep the earliest real date
+// per platform rather than picking one region arbitrarily.
+function buildPlatformDates(releaseDates) {
+  if (!releaseDates || releaseDates.length === 0) return null;
+  const byPlatform = {};
+  for (const rd of releaseDates) {
+    if (!rd.date) continue; // no confirmed date yet — skip, don't guess
+    const key = rd.platform && rd.platform.name ? mapPlatform(rd.platform.name) : null;
+    if (!key) continue;
+    if (!byPlatform[key] || rd.date < byPlatform[key]) byPlatform[key] = rd.date;
+  }
+  return Object.keys(byPlatform).length > 0 ? byPlatform : null;
+}
+
 function toCoverUrl(rawUrl) {
   if (!rawUrl) return null;
   // IGDB gives protocol-relative thumbnail URLs by default (e.g. //images.igdb.com/...t_thumb...).
@@ -182,7 +205,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url;
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name;
         where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
         sort first_release_date asc;
         limit ${PAGE_SIZE};
@@ -227,10 +250,27 @@ module.exports = async function handler(req, res) {
         // hit (see fix log item 8), but a real, cheap gap worth closing.
         if (!g.name || !g.first_release_date || !g.platforms) return null;
 
-        const platforms = [...new Set(g.platforms.map((p) => mapPlatform(p.name)).filter(Boolean))];
+        // Prefer real per-platform release_dates data when IGDB has it — it's
+        // what lets a game show only the platforms with an actually-confirmed
+        // date, and each platform's own date when they genuinely differ (see
+        // buildPlatformDates above). Falls back to the legacy behavior (every
+        // listed platform shares the single first_release_date) whenever
+        // IGDB doesn't have granular data for a game — common for smaller/
+        // less-tracked titles — so a game is never dropped or platform-
+        // stripped just because the richer data isn't there yet.
+        const platformDates = buildPlatformDates(g.release_dates);
+
+        let platforms, date;
+        if (platformDates) {
+          platforms = Object.keys(platformDates);
+          const earliestTs = Math.min(...Object.values(platformDates));
+          date = new Date(earliestTs * 1000);
+        } else {
+          platforms = [...new Set(g.platforms.map((p) => mapPlatform(p.name)).filter(Boolean))];
+          date = new Date(g.first_release_date * 1000);
+        }
         if (platforms.length === 0) return null; // skip games on platforms we don't track
 
-        const date = new Date(g.first_release_date * 1000);
         const genre = g.genres && g.genres.length > 0 ? g.genres[0].name : 'Adventure';
         const genreCategory = mapGenreCategory(genre);
 
@@ -238,6 +278,19 @@ module.exports = async function handler(req, res) {
           title: g.name,
           date: [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()],
           platforms,
+          // Only present when platforms have data-confirmed dates — the
+          // frontend treats a missing/null platformDates as "every platform
+          // shares `date` above" (today's behavior, unchanged for the common
+          // case). Each value is a [year, monthIndex, day] tuple, same shape
+          // as `date`, keyed by the same platform keys as `platforms`.
+          platformDates: platformDates
+            ? Object.fromEntries(
+                Object.entries(platformDates).map(([key, ts]) => {
+                  const d = new Date(ts * 1000);
+                  return [key, [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]];
+                })
+              )
+            : null,
           genre,
           genreCategory,
           desc: truncateSummary(g.summary),
