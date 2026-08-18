@@ -89,6 +89,38 @@ function mapGenreCategory(rawGenre) {
   return GENRE_CATEGORY_MAP[rawGenre.toLowerCase()] || 'Other';
 }
 
+// Maps IGDB's external_games.category enum to the same 4 platform keys used
+// everywhere else in this app. Confirmed against IGDB's actual (undocumented
+// in the public API reference, cross-checked via multiple third-party client
+// libraries and their changelogs) category values: 1 = Steam, 11 = Microsoft
+// (Xbox/Microsoft Store), 16 = Sony/PSN. No Nintendo eShop category exists in
+// IGDB's data at all as of this writing — Switch has no entry here, and the
+// frontend (lib/stores.js) falls back to a plain store search link whenever
+// a platform has no entry in this map, or IGDB simply doesn't have the
+// external_games record for a specific game (very common for games that
+// haven't released yet, which is most of what this app shows — a store
+// listing often doesn't exist until much closer to release).
+const STORE_CATEGORY_MAP = {
+  1: 'pc',    // Steam
+  11: 'xbox', // Microsoft / Xbox
+  16: 'ps',   // Sony / PlayStation Network
+};
+
+function toStoreLinks(externalGames) {
+  if (!externalGames || externalGames.length === 0) return {};
+  const links = {};
+  for (const eg of externalGames) {
+    const platformKey = STORE_CATEGORY_MAP[eg.category];
+    // First match wins if IGDB somehow has more than one record for the same
+    // platform on a game — good enough for a "take me to the store" link,
+    // no need to pick the "best" one.
+    if (platformKey && eg.url && !links[platformKey]) {
+      links[platformKey] = eg.url;
+    }
+  }
+  return links;
+}
+
 function toCoverUrl(rawUrl) {
   if (!rawUrl) return null;
   // IGDB gives protocol-relative thumbnail URLs by default (e.g. //images.igdb.com/...t_thumb...).
@@ -150,7 +182,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url;
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url;
         where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
         sort first_release_date asc;
         limit ${PAGE_SIZE};
@@ -210,6 +242,7 @@ module.exports = async function handler(req, res) {
           genreCategory,
           desc: truncateSummary(g.summary),
           coverUrl: toCoverUrl(g.cover && g.cover.url),
+          storeLinks: toStoreLinks(g.external_games),
         };
       })
       .filter(Boolean);
