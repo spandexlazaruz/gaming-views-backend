@@ -170,21 +170,54 @@ function toCoverUrl(rawUrl) {
   return upgraded.startsWith('//') ? `https:${upgraded}` : upgraded;
 }
 
-// A hard `.slice(0, DESC_LIMIT)` cuts mid-word/mid-sentence with no visual
-// sign it happened — on the game detail screen, that truncated text used to
-// run straight into a fixed marketing sentence with nothing but a single
-// space between them, reading like the marketing sentence was "covering"
-// the end of the description. Backing off to the last whitespace before the
-// limit, and adding an ellipsis only when a real cut happened, fixes the
-// backend half of that (see app/game/[title].js for the frontend half).
-const DESC_LIMIT = 220;
-function truncateSummary(summary) {
+// UPDATED 2026-08-20 (game detail page enrichment, item floated 2026-08-20
+// on the roadmap, layout locked the same day): this used to hard-truncate
+// at DESC_LIMIT=220 chars, backing off to the last whitespace before the cut
+// (see fix log item 11 for why — it used to run straight into a fixed
+// marketing sentence below it with no visual break). Now that the detail
+// screen has its own "Show more/less" treatment for the full description
+// (app/game/[title].js), the backend no longer truncates at all — this is
+// now just a whitespace trim, kept as a named function rather than inlined
+// so the one remaining transformation stays documented in one place.
+function trimSummary(summary) {
   if (!summary) return null;
-  if (summary.length <= DESC_LIMIT) return summary;
-  const slice = summary.slice(0, DESC_LIMIT);
-  const lastSpace = slice.lastIndexOf(' ');
-  const trimmed = (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).trim();
-  return `${trimmed}…`;
+  const trimmed = summary.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+// ADDED 2026-08-20 (game detail page enrichment): screenshots use the same
+// image_id → URL pattern as cover art (IGDB's image CDN is consistent across
+// cover/screenshot/artwork types), confirmed via IGDB's own image docs and
+// multiple community client libraries. t_screenshot_big (889×500) rather
+// than t_1080p (used for the cover hero) — these render as a horizontally-
+// scrollable row of thumbnails, not a single full-width hero, so the bigger
+// template would just be wasted bandwidth for how small they actually
+// display. Capped at 8 — this is a quick-look gallery, not a full archive;
+// IGDB can return considerably more for well-tracked titles.
+const MAX_SCREENSHOTS = 8;
+function toScreenshotUrls(screenshots) {
+  if (!screenshots || screenshots.length === 0) return [];
+  return screenshots
+    .slice(0, MAX_SCREENSHOTS)
+    .map((s) => s.image_id)
+    .filter(Boolean)
+    .map((imageId) => `https://images.igdb.com/igdb/image/upload/t_screenshot_big/${imageId}.jpg`);
+}
+
+// ADDED 2026-08-20 (game detail page enrichment): IGDB's `videos` field only
+// ever gives back a `video_id` — documented by IGDB itself as "the external
+// ID of the video (usually YouTube)," not a raw stream — so this is a
+// YouTube video ID, used by the frontend to build both a thumbnail URL
+// (img.youtube.com) and an embed URL (youtube.com/embed), never a direct
+// video file. IGDB doesn't reliably distinguish a video's type (official
+// trailer vs. gameplay clip vs. teaser — `name` is free text set by whoever
+// submitted it), so taking the first entry is the pragmatic default, same
+// call made in the original trailer-link research (see roadmap Phase 7).
+// Null when a game has no video data at all — common for smaller titles —
+// and the frontend hides the whole Trailer section in that case.
+function firstVideoId(videos) {
+  if (!videos || videos.length === 0) return null;
+  return videos[0].video_id || null;
 }
 
 module.exports = async function handler(req, res) {
@@ -217,7 +250,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name;
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id;
         where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
         sort first_release_date asc;
         limit ${PAGE_SIZE};
@@ -305,9 +338,15 @@ module.exports = async function handler(req, res) {
             : null,
           genre,
           genreCategory,
-          desc: truncateSummary(g.summary),
+          desc: trimSummary(g.summary),
           coverUrl: toCoverUrl(g.cover && g.cover.url),
           storeLinks: toStoreLinks(g.external_games),
+          // Both new 2026-08-20 (game detail page enrichment) — see
+          // toScreenshotUrls/firstVideoId above for sourcing/caveats. Neither
+          // is used anywhere but the detail screen; every list-card view
+          // (Calendar/Watchlist/Search) only ever reads the fields above.
+          screenshots: toScreenshotUrls(g.screenshots),
+          videoId: firstVideoId(g.videos),
         };
       })
       .filter(Boolean);
