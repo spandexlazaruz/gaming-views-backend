@@ -250,7 +250,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id;
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id, hypes;
         where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
         sort first_release_date asc;
         limit ${PAGE_SIZE};
@@ -347,6 +347,22 @@ module.exports = async function handler(req, res) {
           // (Calendar/Watchlist/Search) only ever reads the fields above.
           screenshots: toScreenshotUrls(g.screenshots),
           videoId: firstVideoId(g.videos),
+          // ADDED 2026-08-20 (Phase 3C — "Gaming Views Recommends" hero
+          // carousel): `hypes` is IGDB's own "how many people have marked
+          // this as anticipated" counter, right on the standard /games
+          // endpoint — confirmed via IGDB's real-world usage in the
+          // "most anticipated upcoming games" pattern (a third-party tool
+          // sorts on this exact field, filtered to future/TBA releases,
+          // same shape as this app's own upcoming-releases query), not
+          // guessed. Deliberately not the newer PopScore/popularity_primitives
+          // system — that lives on a separate endpoint requiring its own
+          // query + join, and isn't confirmed to be meaningfully populated
+          // pre-release the way `hypes` is purpose-built to be. Defaults to
+          // 0 (not null) so the frontend can sort/filter on it without a
+          // null-check everywhere — see app/(tabs)/index.js's
+          // pickRecommended() for how a 0/absent value is handled (falls
+          // back to a nearest-release fill-in rather than an empty slot).
+          hypes: g.hypes || 0,
         };
       })
       .filter(Boolean);
