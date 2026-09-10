@@ -166,17 +166,93 @@ function hasXboxGamePass(externalGames) {
 // showing back to 2018 in what's meant to be an upcoming-releases tracker).
 // A platform whose only known date has already passed is treated the same
 // as "not confirmed" for this app's purposes — it's simply not upcoming.
+//
+// FIXED (item 33 — Deluxe Edition's early-access date showing as the "real"
+// release date): this used to be a flat "earliest date wins" per platform,
+// with zero awareness of release_dates.status — confirmed live on "Silent
+// Hill: Townfall": IGDB carries a real Sep 22, 2026 "Advanced Access" entry
+// (its own docs: "availability to players that have pre-ordered or
+// purchased a specific edition") alongside a Sep 24, 2026 "Full Release"
+// entry, same platforms — and "earliest wins" always picked the former.
+// Spot-checked against three more real titles (EA Sports FC 27, Ace Combat
+// 8, Call of Duty: Modern Warfare 4) — all carried clean, consistent status
+// data, though only for AAA titles; smaller/less-tracked games may still
+// have sparse or missing status data, which is exactly why this only
+// PREFERS a Full Release entry when one exists, rather than requiring one.
+//
+// STATUS_FULL_RELEASE (id 6) is IGDB's real release_date_statuses value
+// for "the game has gone gold... referred to as 1.0" — compared by id, same
+// convention as this file's other IGDB enum comparisons (STORE_CATEGORY_MAP,
+// XBOX_GAME_PASS_SOURCE), since id is always present on an expanded relation
+// regardless of which of its own fields (here, just `.name`) are requested.
+const STATUS_FULL_RELEASE = 6;
+
 function buildPlatformDates(releaseDates, nowUnix) {
   if (!releaseDates || releaseDates.length === 0) return null;
+  // First pass: every still-upcoming, mapped-platform entry, grouped by
+  // platform — not reduced to a single winner yet, since picking the winner
+  // now depends on whether a Full Release entry exists at all for that
+  // platform, not just which date is earliest.
   const byPlatform = {};
   for (const rd of releaseDates) {
     if (!rd.date) continue; // no confirmed date yet — skip, don't guess
     if (rd.date <= nowUnix) continue; // already released — not upcoming, don't let it anchor the game's date
     const key = rd.platform && rd.platform.name ? mapPlatform(rd.platform.name) : null;
     if (!key) continue;
-    if (!byPlatform[key] || rd.date < byPlatform[key]) byPlatform[key] = rd.date;
+    (byPlatform[key] = byPlatform[key] || []).push(rd);
   }
-  return Object.keys(byPlatform).length > 0 ? byPlatform : null;
+
+  const result = {};
+  for (const [key, entries] of Object.entries(byPlatform)) {
+    const fullReleaseEntries = entries.filter((rd) => rd.status && rd.status.id === STATUS_FULL_RELEASE);
+    // Prefer the real Full Release date when IGDB actually has one for this
+    // platform. Only fall back to plain "earliest date wins" (the original
+    // behavior, unchanged) when it doesn't — covers games with sparse or
+    // missing status data entirely, so those don't regress.
+    const candidates = fullReleaseEntries.length > 0 ? fullReleaseEntries : entries;
+    result[key] = Math.min(...candidates.map((rd) => rd.date));
+  }
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+// ADDED (item 33 — graceful "Deluxe Edition early access" note): surfaces a
+// genuine edition-specific early-access date alongside (never instead of)
+// the real Full Release date buildPlatformDates now resolves above. Reads
+// `platformDates` (already computed) rather than re-deriving "the real
+// date" itself, so the two can never disagree with each other.
+//
+// STATUS_ADVANCED_ACCESS (id 34) specifically — IGDB's own definition:
+// "availability of the game to players that have pre-ordered or purchased a
+// specific edition." Deliberately NOT the same thing as generic
+// "Early Access" (id 3 — an unfinished/testing release, e.g. Steam EA) or
+// Beta/Alpha (ids 2/1) — those describe an unfinished GAME, not a paid
+// early-access window into a finished one, and showing either as a
+// "Deluxe Edition early access"-style note would be actively misleading.
+// Real guard case, not hypothetical: Call of Duty: Modern Warfare 4 has a
+// real Beta-status date (and would have been surfaced as the game's "release
+// date" under the old bug too) — comparing strictly on
+// STATUS_ADVANCED_ACCESS excludes it here automatically, on top of no
+// longer winning buildPlatformDates above.
+const STATUS_ADVANCED_ACCESS = 34;
+
+function buildEarlyAccessDates(releaseDates, platformDates, nowUnix) {
+  if (!releaseDates || releaseDates.length === 0 || !platformDates) return null;
+  const result = {};
+  for (const rd of releaseDates) {
+    if (!rd.date) continue;
+    if (rd.date <= nowUnix) continue;
+    if (!rd.status || rd.status.id !== STATUS_ADVANCED_ACCESS) continue;
+    const key = rd.platform && rd.platform.name ? mapPlatform(rd.platform.name) : null;
+    if (!key) continue;
+    const fullReleaseTs = platformDates[key];
+    // No confirmed "real" date for this platform to compare against, or
+    // this Advanced Access date isn't actually earlier than it (can happen
+    // — a platform's only Advanced Access entry could in principle land on
+    // or after its Full Release date) — nothing genuinely "early" to note.
+    if (!fullReleaseTs || rd.date >= fullReleaseTs) continue;
+    if (!result[key] || rd.date < result[key]) result[key] = rd.date;
+  }
+  return Object.keys(result).length > 0 ? result : null;
 }
 
 function toCoverUrl(rawUrl) {
@@ -253,18 +329,29 @@ function firstVideoId(videos) {
 // aggregate first_release_date instead of a per-platform breakdown, which is
 // exactly the simpler shape a "what came out" list actually wants.
 function buildQueryWindow(mode, nowUnix) {
+  // ADDED (item 33 fix — Deluxe Edition showing as its own phantom card):
+  // an edition variant (Deluxe/Gold/Ultimate/etc.) is a real, separately
+  // queryable IGDB game entity linked back to its base game via
+  // version_parent — confirmed live: "Silent Hill: Townfall Deluxe
+  // Edition" has its own populated platforms/first_release_date, so
+  // nothing before this excluded it from the exact same query the base
+  // game matches. `version_parent = null` excludes every edition variant
+  // at the query level, before any of this app's own code ever sees them —
+  // only a `where` filter, no need to also request version_parent as a
+  // field since nothing here reads it back.
+  const excludeEditionVariants = 'version_parent = null';
   if (mode === 'last-month') {
     const now = new Date(nowUnix * 1000);
     const startOfThisMonth = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1000);
     const startOfLastMonth = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1) / 1000);
     return {
-      where: `first_release_date >= ${startOfLastMonth} & first_release_date < ${startOfThisMonth} & platforms != null`,
+      where: `first_release_date >= ${startOfLastMonth} & first_release_date < ${startOfThisMonth} & platforms != null & ${excludeEditionVariants}`,
       sort: 'first_release_date desc',
     };
   }
   const oneYearOut = nowUnix + 60 * 60 * 24 * 365;
   return {
-    where: `first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null`,
+    where: `first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null & ${excludeEditionVariants}`,
     sort: 'first_release_date asc',
   };
 }
@@ -291,6 +378,11 @@ function mapIgdbGame(g, nowUnix) {
   // less-tracked titles — so a game is never dropped or platform-
   // stripped just because the richer data isn't there yet.
   const platformDates = buildPlatformDates(g.release_dates, nowUnix);
+  // ADDED (item 33 — graceful "Deluxe Edition early access" note): needs
+  // the resolved platformDates above (the real Full Release dates) to know
+  // what "earlier than the real date" even means — see its own comment for
+  // why this is never confused with generic Early Access/Beta/Alpha.
+  const earlyAccessDates = buildEarlyAccessDates(g.release_dates, platformDates, nowUnix);
 
   let platforms, date;
   if (platformDates) {
@@ -318,6 +410,20 @@ function mapIgdbGame(g, nowUnix) {
     platformDates: platformDates
       ? Object.fromEntries(
           Object.entries(platformDates).map(([key, ts]) => {
+            const d = new Date(ts * 1000);
+            return [key, [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]];
+          })
+        )
+      : null,
+    // ADDED (item 33 — graceful "Deluxe Edition early access" note): same
+    // shape/convention as platformDates above (a [year, monthIndex, day]
+    // tuple per platform key) — only present when a genuine edition-specific
+    // early-access date exists for that platform (see buildEarlyAccessDates).
+    // null/absent otherwise, same "don't show a fabricated value" discipline
+    // as every other optional field in this shape.
+    earlyAccessDates: earlyAccessDates
+      ? Object.fromEntries(
+          Object.entries(earlyAccessDates).map(([key, ts]) => {
             const d = new Date(ts * 1000);
             return [key, [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]];
           })
@@ -388,7 +494,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, external_games.external_game_source, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id, hypes;
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, external_games.external_game_source, release_dates.date, release_dates.platform.name, release_dates.status.name, screenshots.image_id, videos.video_id, hypes;
         where ${where};
         sort ${sort};
         limit ${PAGE_SIZE};
