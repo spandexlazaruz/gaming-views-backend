@@ -121,6 +121,29 @@ function toStoreLinks(externalGames) {
   return links;
 }
 
+// ADDED (item 39 — Xbox Game Pass badge, "What You Missed" only): IGDB's
+// external_games.category enum (used by toStoreLinks above) is itself marked
+// deprecated in IGDB's own docs in favor of external_game_source — and
+// confirmed live, not just per the docs: querying external_games with
+// category = 54 (the enum's own "xbox_game_pass_ultimate_cloud" value)
+// returns zero records at all, while the equivalent
+// external_game_source = 54 returns hundreds. So this reads the newer field
+// specifically, not `category`. Also confirmed live before building this at
+// all (per Dan's explicit ask): querying upcoming games
+// (first_release_date > now) for this flag returns zero matches — IGDB only
+// ever tags it on already-released titles, which is exactly what "What You
+// Missed" (and only that screen, via its last-month query window) shows,
+// unlike every other screen in this app, which only shows unreleased games.
+// A false/absent value here must never be read as "confirmed not on Game
+// Pass" — IGDB's community tagging can lag a real release, especially a
+// very recent one — so the frontend (components/GameCard.js) only ever
+// renders a positive badge, never a negative one.
+const XBOX_GAME_PASS_SOURCE = 54;
+function hasXboxGamePass(externalGames) {
+  if (!externalGames || externalGames.length === 0) return false;
+  return externalGames.some((eg) => eg.external_game_source === XBOX_GAME_PASS_SOURCE);
+}
+
 // Per-platform release dates — separate from `platforms`/`first_release_date`
 // above. IGDB's release_dates sub-resource carries one entry per
 // platform+region combination, each with its own `date`. When a platform's
@@ -305,6 +328,10 @@ function mapIgdbGame(g, nowUnix) {
     desc: trimSummary(g.summary),
     coverUrl: toCoverUrl(g.cover && g.cover.url),
     storeLinks: toStoreLinks(g.external_games),
+    // See hasXboxGamePass's own comment above — true only when IGDB
+    // genuinely has the record; never treat false/absent as "confirmed not
+    // on Game Pass."
+    xboxGamePass: hasXboxGamePass(g.external_games),
     // Both new 2026-08-20 (game detail page enrichment) — see
     // toScreenshotUrls/firstVideoId above for sourcing/caveats. Neither
     // is used anywhere but the detail screen; every list-card view
@@ -361,7 +388,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id, hypes;
+        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, external_games.external_game_source, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id, hypes;
         where ${where};
         sort ${sort};
         limit ${PAGE_SIZE};
