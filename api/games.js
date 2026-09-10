@@ -220,13 +220,124 @@ function firstVideoId(videos) {
   return videos[0].video_id || null;
 }
 
+// ADDED (item 35 — "What You Missed"): `?when=last-month` switches the query
+// window from the default forward-looking one below to a fixed last-
+// calendar-month range, most-recent-first. Deliberately just the one fixed
+// window, not a general past-month browser — that's a scope cut for v1, not
+// an oversight. Reuses every mapping step below (mapIgdbGame) unchanged:
+// buildPlatformDates' "already passed = not confirmed" exclusion (see its
+// own comment) naturally makes every last-month game fall back to the plain
+// aggregate first_release_date instead of a per-platform breakdown, which is
+// exactly the simpler shape a "what came out" list actually wants.
+function buildQueryWindow(mode, nowUnix) {
+  if (mode === 'last-month') {
+    const now = new Date(nowUnix * 1000);
+    const startOfThisMonth = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1000);
+    const startOfLastMonth = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1) / 1000);
+    return {
+      where: `first_release_date >= ${startOfLastMonth} & first_release_date < ${startOfThisMonth} & platforms != null`,
+      sort: 'first_release_date desc',
+    };
+  }
+  const oneYearOut = nowUnix + 60 * 60 * 24 * 365;
+  return {
+    where: `first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null`,
+    sort: 'first_release_date asc',
+  };
+}
+
+// Pulled out of the old inline rawGames.map() below so both the default
+// forward-looking query and the last-month one (see buildQueryWindow above)
+// map IGDB's raw shape to the app's own shape the exact same way — one place
+// to keep in sync, not two copies that can quietly drift apart.
+function mapIgdbGame(g, nowUnix) {
+  // A record with no title (`g.name`) used to slip through here and
+  // crash on an `undefined` title downstream — `app/search.js`'s
+  // `g.title.toLowerCase()` filter and `lib/theme.js`'s
+  // `hashStr(game.title)` (called by GameCard on every card) both
+  // assume a real string. Not the cause of the real crash this project
+  // hit (see fix log item 8), but a real, cheap gap worth closing.
+  if (!g.name || !g.first_release_date || !g.platforms) return null;
+
+  // Prefer real per-platform release_dates data when IGDB has it — it's
+  // what lets a game show only the platforms with an actually-confirmed
+  // date, and each platform's own date when they genuinely differ (see
+  // buildPlatformDates above). Falls back to the legacy behavior (every
+  // listed platform shares the single first_release_date) whenever
+  // IGDB doesn't have granular data for a game — common for smaller/
+  // less-tracked titles — so a game is never dropped or platform-
+  // stripped just because the richer data isn't there yet.
+  const platformDates = buildPlatformDates(g.release_dates, nowUnix);
+
+  let platforms, date;
+  if (platformDates) {
+    platforms = Object.keys(platformDates);
+    const earliestTs = Math.min(...Object.values(platformDates));
+    date = new Date(earliestTs * 1000);
+  } else {
+    platforms = [...new Set(g.platforms.map((p) => mapPlatform(p.name)).filter(Boolean))];
+    date = new Date(g.first_release_date * 1000);
+  }
+  if (platforms.length === 0) return null; // skip games on platforms we don't track
+
+  const genre = g.genres && g.genres.length > 0 ? g.genres[0].name : 'Adventure';
+  const genreCategory = mapGenreCategory(genre);
+
+  return {
+    title: g.name,
+    date: [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()],
+    platforms,
+    // Only present when platforms have data-confirmed dates — the
+    // frontend treats a missing/null platformDates as "every platform
+    // shares `date` above" (today's behavior, unchanged for the common
+    // case). Each value is a [year, monthIndex, day] tuple, same shape
+    // as `date`, keyed by the same platform keys as `platforms`.
+    platformDates: platformDates
+      ? Object.fromEntries(
+          Object.entries(platformDates).map(([key, ts]) => {
+            const d = new Date(ts * 1000);
+            return [key, [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]];
+          })
+        )
+      : null,
+    genre,
+    genreCategory,
+    desc: trimSummary(g.summary),
+    coverUrl: toCoverUrl(g.cover && g.cover.url),
+    storeLinks: toStoreLinks(g.external_games),
+    // Both new 2026-08-20 (game detail page enrichment) — see
+    // toScreenshotUrls/firstVideoId above for sourcing/caveats. Neither
+    // is used anywhere but the detail screen; every list-card view
+    // (Calendar/Watchlist/Search) only ever reads the fields above.
+    screenshots: toScreenshotUrls(g.screenshots),
+    videoId: firstVideoId(g.videos),
+    // ADDED 2026-08-20 (Phase 3C — "Gaming Views Recommends" hero
+    // carousel): `hypes` is IGDB's own "how many people have marked
+    // this as anticipated" counter, right on the standard /games
+    // endpoint — confirmed via IGDB's real-world usage in the
+    // "most anticipated upcoming games" pattern (a third-party tool
+    // sorts on this exact field, filtered to future/TBA releases,
+    // same shape as this app's own upcoming-releases query), not
+    // guessed. Deliberately not the newer PopScore/popularity_primitives
+    // system — that lives on a separate endpoint requiring its own
+    // query + join, and isn't confirmed to be meaningfully populated
+    // pre-release the way `hypes` is purpose-built to be. Defaults to
+    // 0 (not null) so the frontend can sort/filter on it without a
+    // null-check everywhere — see app/(tabs)/index.js's
+    // pickRecommended() for how a 0/absent value is handled (falls
+    // back to a nearest-release fill-in rather than an empty slot).
+    hypes: g.hypes || 0,
+  };
+}
+
 module.exports = async function handler(req, res) {
   try {
     const token = await getAccessToken();
     const clientId = process.env.TWITCH_CLIENT_ID;
 
     const nowUnix = Math.floor(Date.now() / 1000);
-    const oneYearOut = nowUnix + 60 * 60 * 24 * 365;
+    const mode = req.query && req.query.when === 'last-month' ? 'last-month' : 'upcoming';
+    const { where, sort } = buildQueryWindow(mode, nowUnix);
 
     // IGDB caps each request at 500 results. With no filter on release type
     // (DLC, mobile ports, and small indie titles all count equally toward
@@ -251,8 +362,8 @@ module.exports = async function handler(req, res) {
       const offset = page * PAGE_SIZE;
       const query = `
         fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, release_dates.date, release_dates.platform.name, screenshots.image_id, videos.video_id, hypes;
-        where first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null;
-        sort first_release_date asc;
+        where ${where};
+        sort ${sort};
         limit ${PAGE_SIZE};
         offset ${offset};
       `;
@@ -285,87 +396,7 @@ module.exports = async function handler(req, res) {
       if (pageGames.length < PAGE_SIZE) break;
     }
 
-    const games = rawGames
-      .map((g) => {
-        // A record with no title (`g.name`) used to slip through here and
-        // crash on an `undefined` title downstream — `app/search.js`'s
-        // `g.title.toLowerCase()` filter and `lib/theme.js`'s
-        // `hashStr(game.title)` (called by GameCard on every card) both
-        // assume a real string. Not the cause of the real crash this project
-        // hit (see fix log item 8), but a real, cheap gap worth closing.
-        if (!g.name || !g.first_release_date || !g.platforms) return null;
-
-        // Prefer real per-platform release_dates data when IGDB has it — it's
-        // what lets a game show only the platforms with an actually-confirmed
-        // date, and each platform's own date when they genuinely differ (see
-        // buildPlatformDates above). Falls back to the legacy behavior (every
-        // listed platform shares the single first_release_date) whenever
-        // IGDB doesn't have granular data for a game — common for smaller/
-        // less-tracked titles — so a game is never dropped or platform-
-        // stripped just because the richer data isn't there yet.
-        const platformDates = buildPlatformDates(g.release_dates, nowUnix);
-
-        let platforms, date;
-        if (platformDates) {
-          platforms = Object.keys(platformDates);
-          const earliestTs = Math.min(...Object.values(platformDates));
-          date = new Date(earliestTs * 1000);
-        } else {
-          platforms = [...new Set(g.platforms.map((p) => mapPlatform(p.name)).filter(Boolean))];
-          date = new Date(g.first_release_date * 1000);
-        }
-        if (platforms.length === 0) return null; // skip games on platforms we don't track
-
-        const genre = g.genres && g.genres.length > 0 ? g.genres[0].name : 'Adventure';
-        const genreCategory = mapGenreCategory(genre);
-
-        return {
-          title: g.name,
-          date: [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()],
-          platforms,
-          // Only present when platforms have data-confirmed dates — the
-          // frontend treats a missing/null platformDates as "every platform
-          // shares `date` above" (today's behavior, unchanged for the common
-          // case). Each value is a [year, monthIndex, day] tuple, same shape
-          // as `date`, keyed by the same platform keys as `platforms`.
-          platformDates: platformDates
-            ? Object.fromEntries(
-                Object.entries(platformDates).map(([key, ts]) => {
-                  const d = new Date(ts * 1000);
-                  return [key, [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]];
-                })
-              )
-            : null,
-          genre,
-          genreCategory,
-          desc: trimSummary(g.summary),
-          coverUrl: toCoverUrl(g.cover && g.cover.url),
-          storeLinks: toStoreLinks(g.external_games),
-          // Both new 2026-08-20 (game detail page enrichment) — see
-          // toScreenshotUrls/firstVideoId above for sourcing/caveats. Neither
-          // is used anywhere but the detail screen; every list-card view
-          // (Calendar/Watchlist/Search) only ever reads the fields above.
-          screenshots: toScreenshotUrls(g.screenshots),
-          videoId: firstVideoId(g.videos),
-          // ADDED 2026-08-20 (Phase 3C — "Gaming Views Recommends" hero
-          // carousel): `hypes` is IGDB's own "how many people have marked
-          // this as anticipated" counter, right on the standard /games
-          // endpoint — confirmed via IGDB's real-world usage in the
-          // "most anticipated upcoming games" pattern (a third-party tool
-          // sorts on this exact field, filtered to future/TBA releases,
-          // same shape as this app's own upcoming-releases query), not
-          // guessed. Deliberately not the newer PopScore/popularity_primitives
-          // system — that lives on a separate endpoint requiring its own
-          // query + join, and isn't confirmed to be meaningfully populated
-          // pre-release the way `hypes` is purpose-built to be. Defaults to
-          // 0 (not null) so the frontend can sort/filter on it without a
-          // null-check everywhere — see app/(tabs)/index.js's
-          // pickRecommended() for how a 0/absent value is handled (falls
-          // back to a nearest-release fill-in rather than an empty slot).
-          hypes: g.hypes || 0,
-        };
-      })
-      .filter(Boolean);
+    const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean);
 
     // Cache at the edge for an hour — release dates don't change minute to minute,
     // no need to hit IGDB fresh on every single app open.
