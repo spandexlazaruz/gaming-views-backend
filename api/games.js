@@ -1,5 +1,19 @@
 const Sentry = require('../lib/sentry');
 
+// Shared across every IGDB query mode below (upcoming, last-month, lookup)
+// so all three map through mapIgdbGame() with the exact same shape.
+const GAME_FIELDS = 'name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, external_games.external_game_source, release_dates.date, release_dates.platform.name, release_dates.status.name, screenshots.image_id, videos.video_id, hypes';
+
+// ADDED (item 33 fix — Deluxe Edition showing as its own phantom card):
+// an edition variant (Deluxe/Gold/Ultimate/etc.) is a real, separately
+// queryable IGDB game entity linked back to its base game via
+// version_parent — confirmed live: "Silent Hill: Townfall Deluxe Edition"
+// has its own populated platforms/first_release_date, so nothing before
+// this excluded it from the exact same query the base game matches.
+// `version_parent = null` excludes every edition variant at the query
+// level, before any of this app's own code ever sees them.
+const EXCLUDE_EDITION_VARIANTS = 'version_parent = null';
+
 // In-memory cache for the Twitch access token. Persists across "warm"
 // invocations of this function on Vercel, so we're not re-authenticating
 // on every single request.
@@ -255,18 +269,34 @@ function buildEarlyAccessDates(releaseDates, platformDates, nowUnix) {
   return Object.keys(result).length > 0 ? result : null;
 }
 
-function toCoverUrl(rawUrl) {
+// IGDB gives protocol-relative thumbnail URLs by default (e.g.
+// //images.igdb.com/...t_thumb...) — every size variant is a straight
+// string swap on the same image_id, no extra IGDB query needed.
+function buildImageUrl(rawUrl, sizeTemplate) {
   if (!rawUrl) return null;
-  // IGDB gives protocol-relative thumbnail URLs by default (e.g. //images.igdb.com/...t_thumb...).
-  // Upgrade to a larger size and add the protocol. t_cover_big (~227x320) was
-  // a low ceiling for the full-width hero image on the game detail screen,
-  // especially on higher-density phone screens — t_1080p is IGDB's larger
-  // template and applies to cover images too, not just screenshots. Trade-off
-  // is more bandwidth per image load across every screen that renders a
-  // cover (Calendar, Watchlist, Search, detail hero) — accepted deliberately,
-  // not a bug fix (see fix log item 12).
-  const upgraded = rawUrl.replace('t_thumb', 't_1080p');
+  const upgraded = rawUrl.replace('t_thumb', sizeTemplate);
   return upgraded.startsWith('//') ? `https:${upgraded}` : upgraded;
+}
+
+// REVISED (perf regression found 2026-09-15): fix log item 12 originally
+// upgraded this to t_1080p everywhere — reasoned about the full-width detail
+// hero, but coverUrl is the ONLY cover image field, so every card thumbnail
+// (Calendar, Watchlist, Search, What You Missed — all rendering GameCard's
+// 96x96pt thumb) was downloading a full 1080p-template image too, ~10-15x
+// more pixels than a 96pt thumbnail needs even at 3x density. That's exactly
+// the "slow pulling in images" Dan reported live. t_cover_big (264x374) is
+// IGDB's own named cover-art preset — still sharp at 96pt on Retina, a
+// fraction of the bytes. The hero image itself moved to its own field,
+// coverHeroUrl (see mapIgdbGame below), so the one screen that actually
+// wants 1080p still gets it.
+function toCoverUrl(rawUrl) {
+  return buildImageUrl(rawUrl, 't_cover_big');
+}
+
+// The full-width hero on the game detail screen (app/game/[title].js) —
+// the one place t_1080p's extra resolution is actually used.
+function toCoverHeroUrl(rawUrl) {
+  return buildImageUrl(rawUrl, 't_1080p');
 }
 
 // UPDATED 2026-08-20 (game detail page enrichment, item floated 2026-08-20
@@ -329,29 +359,18 @@ function firstVideoId(videos) {
 // aggregate first_release_date instead of a per-platform breakdown, which is
 // exactly the simpler shape a "what came out" list actually wants.
 function buildQueryWindow(mode, nowUnix) {
-  // ADDED (item 33 fix — Deluxe Edition showing as its own phantom card):
-  // an edition variant (Deluxe/Gold/Ultimate/etc.) is a real, separately
-  // queryable IGDB game entity linked back to its base game via
-  // version_parent — confirmed live: "Silent Hill: Townfall Deluxe
-  // Edition" has its own populated platforms/first_release_date, so
-  // nothing before this excluded it from the exact same query the base
-  // game matches. `version_parent = null` excludes every edition variant
-  // at the query level, before any of this app's own code ever sees them —
-  // only a `where` filter, no need to also request version_parent as a
-  // field since nothing here reads it back.
-  const excludeEditionVariants = 'version_parent = null';
   if (mode === 'last-month') {
     const now = new Date(nowUnix * 1000);
     const startOfThisMonth = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1000);
     const startOfLastMonth = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1) / 1000);
     return {
-      where: `first_release_date >= ${startOfLastMonth} & first_release_date < ${startOfThisMonth} & platforms != null & ${excludeEditionVariants}`,
+      where: `first_release_date >= ${startOfLastMonth} & first_release_date < ${startOfThisMonth} & platforms != null & ${EXCLUDE_EDITION_VARIANTS}`,
       sort: 'first_release_date desc',
     };
   }
   const oneYearOut = nowUnix + 60 * 60 * 24 * 365;
   return {
-    where: `first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null & ${excludeEditionVariants}`,
+    where: `first_release_date > ${nowUnix} & first_release_date < ${oneYearOut} & platforms != null & ${EXCLUDE_EDITION_VARIANTS}`,
     sort: 'first_release_date asc',
   };
 }
@@ -433,6 +452,7 @@ function mapIgdbGame(g, nowUnix) {
     genreCategory,
     desc: trimSummary(g.summary),
     coverUrl: toCoverUrl(g.cover && g.cover.url),
+    coverHeroUrl: toCoverHeroUrl(g.cover && g.cover.url),
     storeLinks: toStoreLinks(g.external_games),
     // See hasXboxGamePass's own comment above — true only when IGDB
     // genuinely has the record; never treat false/absent as "confirmed not
@@ -463,13 +483,73 @@ function mapIgdbGame(g, nowUnix) {
   };
 }
 
+// IGDB's Apicalypse `where field = "value"` does a literal string match —
+// only the quote character and backslashes inside the value need escaping,
+// there's no wildcard/regex syntax to worry about here.
+function escapeIgdbString(str) {
+  return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// ADDED (Wolverine bug — "Game not found" for a title that already released
+// THIS calendar month): the 'upcoming' window is first_release_date >
+// nowUnix, and 'last-month' is a fixed previous-calendar-month range (see
+// buildQueryWindow) — a game released earlier this month, including today,
+// matches neither, so it's invisible to both even though the Watchlist's
+// own 24h-post-release grace window (WatchlistContext's savedGameSnapshots,
+// a local cache — no backend round-trip) correctly keeps its card visible.
+// Rather than add a third fixed date window with its own gap at the next
+// boundary, this looks the exact title up directly with no date filter at
+// all — correct for a title released at any point in the past, not just
+// this specific month-boundary case. Exact match only (not IGDB's fuzzy
+// `search`), since the caller already has the precise title string from
+// wherever it was first fetched/stored.
+async function lookupGameByTitle(title, token, clientId, nowUnix) {
+  const query = `
+    fields ${GAME_FIELDS};
+    where name = "${escapeIgdbString(title)}" & ${EXCLUDE_EDITION_VARIANTS};
+    limit 1;
+  `;
+
+  const igdbResponse = await fetch('https://api.igdb.com/v4/games', {
+    method: 'POST',
+    headers: {
+      'Client-ID': clientId,
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'text/plain',
+    },
+    body: query,
+  });
+
+  if (!igdbResponse.ok) {
+    const detail = await igdbResponse.text();
+    throw new Error(`IGDB request failed (${igdbResponse.status}): ${detail}`);
+  }
+
+  const rawGames = await igdbResponse.json();
+  const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean);
+  return games[0] || null;
+}
+
 module.exports = async function handler(req, res) {
   try {
     const token = await getAccessToken();
     const clientId = process.env.TWITCH_CLIENT_ID;
 
     const nowUnix = Math.floor(Date.now() / 1000);
-    const mode = req.query && req.query.when === 'last-month' ? 'last-month' : 'upcoming';
+    const whenParam = req.query && req.query.when;
+
+    if (whenParam === 'lookup') {
+      const title = req.query && req.query.title;
+      if (!title) {
+        return res.status(400).json({ error: 'Missing title query parameter' });
+      }
+      const game = await lookupGameByTitle(title, token, clientId, nowUnix);
+      const games = game ? [game] : [];
+      res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
+      return res.status(200).json({ games, count: games.length });
+    }
+
+    const mode = whenParam === 'last-month' ? 'last-month' : 'upcoming';
     const { where, sort } = buildQueryWindow(mode, nowUnix);
 
     // IGDB caps each request at 500 results. With no filter on release type
@@ -494,7 +574,7 @@ module.exports = async function handler(req, res) {
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
       const query = `
-        fields name, first_release_date, platforms.name, genres.name, summary, cover.url, external_games.category, external_games.url, external_games.external_game_source, release_dates.date, release_dates.platform.name, release_dates.status.name, screenshots.image_id, videos.video_id, hypes;
+        fields ${GAME_FIELDS};
         where ${where};
         sort ${sort};
         limit ${PAGE_SIZE};
