@@ -483,6 +483,20 @@ function mapIgdbGame(g, nowUnix) {
   };
 }
 
+// ADDED (startup-performance fix): desc/coverHeroUrl/screenshots/videoId
+// together accounted for ~66% of the full /api/games payload (~2.3MB of
+// ~3.4MB for ~3,135 games) despite being read by nothing but the detail
+// screen (app/game/[title].js) — confirmed via grep, and already called
+// out as a known trade-off in mapIgdbGame's own comment above when these
+// fields were first added. Applied only to the two list-returning modes
+// (default "upcoming" and ?when=last-month) below — the detail screen now
+// always fetches full detail via ?when=lookup (see the frontend's
+// useGameLookup), which still returns every field untouched.
+function stripDetailFields(game) {
+  const { desc, coverHeroUrl, screenshots, videoId, ...listGame } = game;
+  return listGame;
+}
+
 // IGDB's Apicalypse `where field = "value"` does a literal string match —
 // only the quote character and backslashes inside the value need escaping,
 // there's no wildcard/regex syntax to worry about here.
@@ -609,7 +623,7 @@ module.exports = async function handler(req, res) {
       if (pageGames.length < PAGE_SIZE) break;
     }
 
-    const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean);
+    const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean).map(stripDetailFields);
 
     // Cache at the edge for an hour — release dates don't change minute to minute,
     // no need to hit IGDB fresh on every single app open.
