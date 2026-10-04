@@ -482,6 +482,22 @@ function mapIgdbGame(g, nowUnix) {
     // pickRecommended() for how a 0/absent value is handled (falls
     // back to a nearest-release fill-in rather than an empty slot).
     hypes: g.hypes || 0,
+    // ADDED (real bug found via on-device testing - "Fable" resolving to
+    // completely unrelated games, including an indie title and a 1996
+    // Puzzle game, across different requests): IGDB has multiple real,
+    // distinct records sharing an exact title (common for a reused
+    // franchise name), and a title-only lookup (lookupGameByTitle below)
+    // can't reliably disambiguate between them even with a sort tie-break
+    // - ties on the sort field aren't guaranteed stable across requests.
+    // `id` is IGDB's own numeric primary key, always returned on every
+    // record regardless of the `fields` clause (confirmed - it's implicit
+    // in Apicalypse, never needs to be requested). Carrying it through
+    // every mode means the frontend can re-fetch full detail for an
+    // ALREADY-correctly-identified game (from the upcoming list,
+    // last-month, or a Steam match) by this exact id instead of by title
+    // - a genuinely unambiguous lookup, see lookupGameById below and
+    // lib/GamesContext.js's useGameLookup.
+    igdbId: g.id,
   };
 }
 
@@ -565,6 +581,40 @@ async function lookupGameByTitle(title, token, clientId, nowUnix) {
   return games[0] || null;
 }
 
+// ADDED (real bug found via on-device testing - see lookupGameByTitle's own
+// comment above, and mapIgdbGame's igdbId field): a numeric id match is
+// genuinely unambiguous, unlike a title match - two different real IGDB
+// records can share an exact title, but never the same id. Used by the
+// frontend (lib/GamesContext.js's useGameLookup) whenever it already has an
+// igdbId for the exact game it means (from the upcoming list, last-month,
+// or a Steam match), instead of falling back to the fragile title lookup
+// above - which stays in place only for the cases with no igdbId to work
+// from yet (a fresh Search result, or a Steam-only fallback game IGDB has
+// no record of at all).
+async function lookupGameById(id, token, clientId, nowUnix) {
+  const query = `
+    fields ${GAME_FIELDS};
+    where id = ${Number(id)};
+    limit 1;
+  `;
+
+  const igdbResponse = await fetch('https://api.igdb.com/v4/games', {
+    method: 'POST',
+    headers: {
+      'Client-ID': clientId,
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'text/plain',
+    },
+    body: query,
+  });
+
+  if (!igdbResponse.ok) return null;
+
+  const rawGames = await igdbResponse.json();
+  const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean);
+  return games[0] || null;
+}
+
 // ADDED (Steam wishlist auto-sync): given a Steam App ID, find the matching
 // IGDB game via external_games.uid - the same external_games sub-resource
 // already requested in GAME_FIELDS and already used by toStoreLinks above,
@@ -626,11 +676,23 @@ module.exports = async function handler(req, res) {
     const whenParam = req.query && req.query.when;
 
     if (whenParam === 'lookup') {
+      // ADDED (real bug found via on-device testing - "Fable" resolving to
+      // completely unrelated games across requests): an `id` param, when
+      // present, is preferred over `title` - an unambiguous primary-key
+      // match, unlike a title which IGDB can have multiple real, distinct
+      // records sharing exactly. See lookupGameById and mapIgdbGame's
+      // igdbId field for the full story. `title` stays supported (and is
+      // still what a caller with no igdbId yet - a fresh Search result, a
+      // Steam-only fallback game - has to use), so this endpoint's shape
+      // is unchanged for every existing caller.
+      const id = req.query && req.query.id;
       const title = req.query && req.query.title;
-      if (!title) {
-        return res.status(400).json({ error: 'Missing title query parameter' });
+      if (!id && !title) {
+        return res.status(400).json({ error: 'Missing id or title query parameter' });
       }
-      const game = await lookupGameByTitle(title, token, clientId, nowUnix);
+      const game = id
+        ? await lookupGameById(id, token, clientId, nowUnix)
+        : await lookupGameByTitle(title, token, clientId, nowUnix);
       const games = game ? [game] : [];
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.status(200).json({ games, count: games.length });
