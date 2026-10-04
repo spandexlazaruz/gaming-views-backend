@@ -519,10 +519,29 @@ function escapeIgdbString(str) {
 // this specific month-boundary case. Exact match only (not IGDB's fuzzy
 // `search`), since the caller already has the precise title string from
 // wherever it was first fetched/stored.
+//
+// FIXED (real bug found via on-device testing — "Fable" resolving to
+// 1996's Puzzle game instead of the actual upcoming Fable reboot): an
+// exact `name` match isn't unique - IGDB has multiple real, distinct game
+// records that happen to share an exact title (common for a reused
+// franchise name decades apart, confirmed live for "Fable"), and `limit 1`
+// with no sort previously just took whatever order IGDB returned them in
+// (its own internal id order - oldest first), with zero regard for which
+// one this app - an upcoming-releases tracker - actually means. Sorting by
+// hypes desc (IGDB's own "how many people have marked this as
+// anticipated" counter, already used elsewhere in this file for "most
+// anticipated upcoming" sorting - see mapIgdbGame's own comment) breaks
+// the tie toward whichever same-named game people are actually anticipating
+// right now, which for a reused franchise name is overwhelmingly the
+// current/upcoming entry, not a decades-old one with ~zero hype. Doesn't
+// fully solve genuinely ambiguous cases with no hype data either way, but
+// is a real, well-reasoned improvement over "oldest wins" for the common
+// case this surfaced from.
 async function lookupGameByTitle(title, token, clientId, nowUnix) {
   const query = `
     fields ${GAME_FIELDS};
     where name = "${escapeIgdbString(title)}" & ${EXCLUDE_EDITION_VARIANTS};
+    sort hypes desc;
     limit 1;
   `;
 
