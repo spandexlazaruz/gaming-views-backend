@@ -603,6 +603,37 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ games, count: games.length });
     }
 
+    // TEMPORARY diagnostic (remove before merge): raw IGDB response for a
+    // single Steam App ID, to debug why lookupGameBySteamAppId is matching
+    // nothing against a real wishlist.
+    if (whenParam === 'steam-debug') {
+      const steamAppId = req.query && req.query.steamAppId;
+      const query = `
+        fields ${GAME_FIELDS};
+        where external_games.uid = "${escapeIgdbString(steamAppId)}" & external_games.category = 1;
+        limit 5;
+      `;
+      const altQuery = `
+        fields ${GAME_FIELDS};
+        where external_games.uid = "${escapeIgdbString(steamAppId)}";
+        limit 5;
+      `;
+      const r1 = await fetch('https://api.igdb.com/v4/games', {
+        method: 'POST',
+        headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
+        body: query,
+      });
+      const r2 = await fetch('https://api.igdb.com/v4/games', {
+        method: 'POST',
+        headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
+        body: altQuery,
+      });
+      return res.status(200).json({
+        withCategory1: await r1.json(),
+        withoutCategoryFilter: await r2.json(),
+      });
+    }
+
     // ADDED (Steam wishlist auto-sync): given a linked SteamID64 (the app
     // stores this locally - see gaming-views-app/lib/SteamLinkContext.js -
     // there's no backend user-account system to look it up from), fetch
