@@ -1,4 +1,5 @@
 const Sentry = require('../lib/sentry');
+const { fetchSteamWishlist } = require('../lib/steamWishlist');
 
 // Shared across every IGDB query mode below (upcoming, last-month, lookup)
 // so all three map through mapIgdbGame() with the exact same shape.
@@ -544,6 +545,45 @@ async function lookupGameByTitle(title, token, clientId, nowUnix) {
   return games[0] || null;
 }
 
+// ADDED (Steam wishlist auto-sync): given a Steam App ID, find the matching
+// IGDB game via external_games.uid - the same external_games sub-resource
+// already requested in GAME_FIELDS and already used by toStoreLinks above,
+// just inverted (looking a game up BY its Steam id, instead of reading a
+// Steam id off an already-known game). Category 1 is the same "this is a
+// Steam external_games record" convention STORE_CATEGORY_MAP already uses.
+// Deliberately no EXCLUDE_EDITION_VARIANTS filter here, unlike
+// lookupGameByTitle - a wishlist match shouldn't silently fail just because
+// IGDB happens to classify that exact Steam listing as an edition variant;
+// the title the user actually wishlisted on Steam is the one that should
+// show up.
+// No retry/backoff - this app has none anywhere yet (see the main paged
+// query's own lack of one), and a wishlist can be tens to low hundreds of
+// items, called sequentially; Vercel Pro's 300s function timeout is the
+// same backstop already relied on for the main query's own worst case.
+async function lookupGameBySteamAppId(steamAppId, token, clientId, nowUnix) {
+  const query = `
+    fields ${GAME_FIELDS};
+    where external_games.uid = "${escapeIgdbString(steamAppId)}" & external_games.category = 1;
+    limit 1;
+  `;
+
+  const igdbResponse = await fetch('https://api.igdb.com/v4/games', {
+    method: 'POST',
+    headers: {
+      'Client-ID': clientId,
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'text/plain',
+    },
+    body: query,
+  });
+
+  if (!igdbResponse.ok) return null; // one bad/unmatched id shouldn't fail the whole sync
+
+  const rawGames = await igdbResponse.json();
+  const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean);
+  return games[0] || null;
+}
+
 module.exports = async function handler(req, res) {
   try {
     const token = await getAccessToken();
@@ -561,6 +601,33 @@ module.exports = async function handler(req, res) {
       const games = game ? [game] : [];
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.status(200).json({ games, count: games.length });
+    }
+
+    // ADDED (Steam wishlist auto-sync): given a linked SteamID64 (the app
+    // stores this locally - see gaming-views-app/lib/SteamLinkContext.js -
+    // there's no backend user-account system to look it up from), fetch
+    // their current wishlist and resolve each Steam App ID to this app's
+    // own game shape via lookupGameBySteamAppId above. Unmatched ids are
+    // silently skipped rather than failing the request - a wishlist with
+    // one untracked indie title alongside AAA games the user actually
+    // wants synced shouldn't come back empty over that one miss.
+    // No Cache-Control header here, unlike every other mode - this is one
+    // specific person's wishlist, far more mutable than the shared release
+    // calendar the other modes cache for an hour.
+    if (whenParam === 'steam-wishlist') {
+      const steamId = req.query && req.query.steamid;
+      if (!steamId) {
+        return res.status(400).json({ error: 'Missing steamid query parameter' });
+      }
+      const appIds = await fetchSteamWishlist(steamId);
+      const games = [];
+      let unmatchedCount = 0;
+      for (const appId of appIds) {
+        const game = await lookupGameBySteamAppId(appId, token, clientId, nowUnix);
+        if (game) games.push(game);
+        else unmatchedCount++;
+      }
+      return res.status(200).json({ games, count: games.length, unmatchedCount });
     }
 
     const mode = whenParam === 'last-month' ? 'last-month' : 'upcoming';
