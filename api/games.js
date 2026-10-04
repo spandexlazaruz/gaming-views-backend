@@ -659,7 +659,15 @@ module.exports = async function handler(req, res) {
         ]);
         const steamPrice = extractSteamPrice(steamDetails);
         const game = igdbGame || buildLightweightGameFromSteam(appId, steamDetails);
-        if (game) games.push(steamPrice ? { ...game, steam: steamPrice } : game);
+        // ADDED (duplicate-prevention): everything in this app is keyed by
+        // title string, not a numeric id - a single Steam App ID can
+        // resolve to a different title across syncs (e.g. no IGDB match
+        // yet, so it's added under Steam's own title, then IGDB adds a
+        // record later and the same App ID resolves to IGDB's title
+        // instead). Carrying the App ID through lets the frontend
+        // (SteamLinkContext.js) detect that case and migrate the existing
+        // entry instead of creating a second one under the new title.
+        if (game) games.push({ ...game, steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) });
         else unmatchedCount++;
       }
       return res.status(200).json({ games, count: games.length, unmatchedCount });
