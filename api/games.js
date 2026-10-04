@@ -667,7 +667,22 @@ module.exports = async function handler(req, res) {
         // instead). Carrying the App ID through lets the frontend
         // (SteamLinkContext.js) detect that case and migrate the existing
         // entry instead of creating a second one under the new title.
-        if (game) games.push({ ...game, steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) });
+        //
+        // FIXED (real gap, found from Dan's own knowledge that one real
+        // wishlisted title - 1666: Amsterdam - is already out in Early
+        // Access, confirmed against its IGDB date of Aug 25, 2026, already
+        // in the past): every other query mode in this file enforces
+        // "upcoming only" (buildQueryWindow's `first_release_date > nowUnix`
+        // for the main list, same idea behind the Watchlist's own 24h grace
+        // window for a title that JUST passed that line) - this Steam-match
+        // path never did, since it was built to find *a* match for an App
+        // ID, not to enforce that invariant. "Show every wishlisted game
+        // regardless of date" was about not excluding a match just for
+        // being outside the normal 12-month window or far in the future -
+        // not about including something that's already released, which
+        // this app has never treated as "upcoming" anywhere else.
+        const alreadyReleased = game && (Date.UTC(game.date[0], game.date[1], game.date[2]) / 1000) <= nowUnix;
+        if (game && !alreadyReleased) games.push({ ...game, steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) });
         else unmatchedCount++;
       }
       return res.status(200).json({ games, count: games.length, unmatchedCount });
