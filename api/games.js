@@ -1,5 +1,6 @@
 const Sentry = require('../lib/sentry');
 const { fetchSteamWishlist } = require('../lib/steamWishlist');
+const { fetchSteamAppDetails, extractSteamPrice, buildLightweightGameFromSteam } = require('../lib/steamAppDetails');
 
 // Shared across every IGDB query mode below (upcoming, last-month, lookup)
 // so all three map through mapIgdbGame() with the exact same shape.
@@ -627,6 +628,22 @@ module.exports = async function handler(req, res) {
     // No Cache-Control header here, unlike every other mode - this is one
     // specific person's wishlist, far more mutable than the shared release
     // calendar the other modes cache for an hour.
+    //
+    // UPDATED (per Dan's explicit ask: "show all games on a user's Steam
+    // wishlist regardless of date and a price where applicable"):
+    // lookupGameBySteamAppId alone was dropping two real categories of
+    // wishlisted game - one more than a year out or already past per
+    // IGDB's own data (confirmed on-device: the frontend's own upcoming
+    // list has a 12-month window, so a match outside it had nothing to
+    // render with), and one IGDB has no record of at all. Now also calls
+    // Steam's own appdetails endpoint (lib/steamAppDetails.js) per item,
+    // in parallel with the IGDB lookup: enriches an IGDB match with real
+    // Steam pricing when there is one, and builds a full fallback game
+    // object straight from Steam's own name/release_date/header_image
+    // when IGDB has no match - so a title only drops out of the response
+    // (unmatchedCount) when NEITHER source has anything usable (most
+    // commonly a "Coming soon"/TBA Steam date with no IGDB record either -
+    // nothing in the app can render a game with no date at all).
     if (whenParam === 'steam-wishlist') {
       const steamId = req.query && req.query.steamid;
       if (!steamId) {
@@ -636,8 +653,13 @@ module.exports = async function handler(req, res) {
       const games = [];
       let unmatchedCount = 0;
       for (const appId of appIds) {
-        const game = await lookupGameBySteamAppId(appId, token, clientId, nowUnix);
-        if (game) games.push(game);
+        const [igdbGame, steamDetails] = await Promise.all([
+          lookupGameBySteamAppId(appId, token, clientId, nowUnix),
+          fetchSteamAppDetails(appId),
+        ]);
+        const steamPrice = extractSteamPrice(steamDetails);
+        const game = igdbGame || buildLightweightGameFromSteam(appId, steamDetails);
+        if (game) games.push(steamPrice ? { ...game, steam: steamPrice } : game);
         else unmatchedCount++;
       }
       return res.status(200).json({ games, count: games.length, unmatchedCount });
