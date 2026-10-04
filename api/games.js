@@ -549,8 +549,21 @@ async function lookupGameByTitle(title, token, clientId, nowUnix) {
 // IGDB game via external_games.uid - the same external_games sub-resource
 // already requested in GAME_FIELDS and already used by toStoreLinks above,
 // just inverted (looking a game up BY its Steam id, instead of reading a
-// Steam id off an already-known game). Category 1 is the same "this is a
-// Steam external_games record" convention STORE_CATEGORY_MAP already uses.
+// Steam id off an already-known game).
+//
+// FIXED (real bug found via on-device testing): originally filtered on
+// external_games.category = 1 (STORE_CATEGORY_MAP's "Steam" convention,
+// reused from toStoreLinks). Every one of a real 16-item wishlist came back
+// unmatched. Added a temporary debug endpoint and confirmed live: IGDB's
+// external_games.category field simply isn't populated on current data
+// (the same deprecation already flagged in hasXboxGamePass's own comment
+// above, for the same external_games sub-resource, just not yet noticed
+// for category 1/11/16 specifically because toStoreLinks degrades
+// silently when it's missing - a quietly absent store link reads as "IGDB
+// doesn't have one for this game," not as a bug). The real, current field
+// is external_game_source, confirmed live: a known-wishlisted title's
+// Steam external_games entry has "external_game_source":1 and no
+// "category" field at all. Filtering on external_game_source = 1 instead.
 // Deliberately no EXCLUDE_EDITION_VARIANTS filter here, unlike
 // lookupGameByTitle - a wishlist match shouldn't silently fail just because
 // IGDB happens to classify that exact Steam listing as an edition variant;
@@ -563,7 +576,7 @@ async function lookupGameByTitle(title, token, clientId, nowUnix) {
 async function lookupGameBySteamAppId(steamAppId, token, clientId, nowUnix) {
   const query = `
     fields ${GAME_FIELDS};
-    where external_games.uid = "${escapeIgdbString(steamAppId)}" & external_games.category = 1;
+    where external_games.uid = "${escapeIgdbString(steamAppId)}" & external_games.external_game_source = 1;
     limit 1;
   `;
 
@@ -601,37 +614,6 @@ module.exports = async function handler(req, res) {
       const games = game ? [game] : [];
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.status(200).json({ games, count: games.length });
-    }
-
-    // TEMPORARY diagnostic (remove before merge): raw IGDB response for a
-    // single Steam App ID, to debug why lookupGameBySteamAppId is matching
-    // nothing against a real wishlist.
-    if (whenParam === 'steam-debug') {
-      const steamAppId = req.query && req.query.steamAppId;
-      const query = `
-        fields ${GAME_FIELDS};
-        where external_games.uid = "${escapeIgdbString(steamAppId)}" & external_games.category = 1;
-        limit 5;
-      `;
-      const altQuery = `
-        fields ${GAME_FIELDS};
-        where external_games.uid = "${escapeIgdbString(steamAppId)}";
-        limit 5;
-      `;
-      const r1 = await fetch('https://api.igdb.com/v4/games', {
-        method: 'POST',
-        headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
-        body: query,
-      });
-      const r2 = await fetch('https://api.igdb.com/v4/games', {
-        method: 'POST',
-        headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
-        body: altQuery,
-      });
-      return res.status(200).json({
-        withCategory1: await r1.json(),
-        withoutCategoryFilter: await r2.json(),
-      });
     }
 
     // ADDED (Steam wishlist auto-sync): given a linked SteamID64 (the app
