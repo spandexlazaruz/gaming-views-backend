@@ -731,41 +731,66 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ error: 'Missing steamid query parameter' });
       }
       const appIds = await fetchSteamWishlist(steamId);
-      const games = [];
-      let unmatchedCount = 0;
-      for (const appId of appIds) {
-        const [igdbGame, steamDetails] = await Promise.all([
-          lookupGameBySteamAppId(appId, token, clientId, nowUnix),
-          fetchSteamAppDetails(appId),
-        ]);
-        const steamPrice = extractSteamPrice(steamDetails);
-        const game = igdbGame || buildLightweightGameFromSteam(appId, steamDetails);
-        // ADDED (duplicate-prevention): everything in this app is keyed by
-        // title string, not a numeric id - a single Steam App ID can
-        // resolve to a different title across syncs (e.g. no IGDB match
-        // yet, so it's added under Steam's own title, then IGDB adds a
-        // record later and the same App ID resolves to IGDB's title
-        // instead). Carrying the App ID through lets the frontend
-        // (SteamLinkContext.js) detect that case and migrate the existing
-        // entry instead of creating a second one under the new title.
-        //
-        // FIXED (real gap, found from Dan's own knowledge that one real
-        // wishlisted title - 1666: Amsterdam - is already out in Early
-        // Access, confirmed against its IGDB date of Aug 25, 2026, already
-        // in the past): every other query mode in this file enforces
-        // "upcoming only" (buildQueryWindow's `first_release_date > nowUnix`
-        // for the main list, same idea behind the Watchlist's own 24h grace
-        // window for a title that JUST passed that line) - this Steam-match
-        // path never did, since it was built to find *a* match for an App
-        // ID, not to enforce that invariant. "Show every wishlisted game
-        // regardless of date" was about not excluding a match just for
-        // being outside the normal 12-month window or far in the future -
-        // not about including something that's already released, which
-        // this app has never treated as "upcoming" anywhere else.
-        const alreadyReleased = game && (Date.UTC(game.date[0], game.date[1], game.date[2]) / 1000) <= nowUnix;
-        if (game && !alreadyReleased) games.push({ ...game, steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) });
-        else unmatchedCount++;
+      // FIXED (real perf issue found from closed-testing feedback: load
+      // times increased after Steam linking): this used to await each
+      // App ID's pair of lookups fully before starting the next one -
+      // confirmed live, an 11.3s response for a real 15-item wishlist.
+      // Batched instead of made fully concurrent on purpose - IGDB's API
+      // is rate-limited to ~4 requests/second per API key, and firing
+      // every item's IGDB + Steam appdetails calls at once (30-40+
+      // concurrent requests for a modest wishlist) risked tripping that
+      // limit. A rate-limited IGDB call here would come back non-ok and
+      // be silently treated as "no match" by lookupGameBySteamAppId (no
+      // retry/backoff exists anywhere in this file) - trading speed for
+      // worse match quality, not an acceptable trade. BATCH_SIZE 5 stays
+      // safely under that ceiling while cutting total time roughly 5x.
+      // Array order is preserved regardless of batching - each chunk's
+      // Promise.all results land in the same positions they'd have had
+      // in the original sequential loop.
+      const BATCH_SIZE = 5;
+      const resolved = [];
+      for (let i = 0; i < appIds.length; i += BATCH_SIZE) {
+        const batch = appIds.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(batch.map(async (appId) => {
+          const [igdbGame, steamDetails] = await Promise.all([
+            lookupGameBySteamAppId(appId, token, clientId, nowUnix),
+            fetchSteamAppDetails(appId),
+          ]);
+          const steamPrice = extractSteamPrice(steamDetails);
+          const game = igdbGame || buildLightweightGameFromSteam(appId, steamDetails);
+          // ADDED (duplicate-prevention): everything in this app is keyed
+          // by title string, not a numeric id - a single Steam App ID can
+          // resolve to a different title across syncs (e.g. no IGDB match
+          // yet, so it's added under Steam's own title, then IGDB adds a
+          // record later and the same App ID resolves to IGDB's title
+          // instead). Carrying the App ID through lets the frontend
+          // (SteamLinkContext.js) detect that case and migrate the
+          // existing entry instead of creating a second one under the
+          // new title.
+          //
+          // FIXED (real gap, found from Dan's own knowledge that one real
+          // wishlisted title - 1666: Amsterdam - is already out in Early
+          // Access, confirmed against its IGDB date of Aug 25, 2026,
+          // already in the past): every other query mode in this file
+          // enforces "upcoming only" (buildQueryWindow's
+          // `first_release_date > nowUnix` for the main list, same idea
+          // behind the Watchlist's own 24h grace window for a title that
+          // JUST passed that line) - this Steam-match path never did,
+          // since it was built to find *a* match for an App ID, not to
+          // enforce that invariant. "Show every wishlisted game
+          // regardless of date" was about not excluding a match just for
+          // being outside the normal 12-month window or far in the
+          // future - not about including something that's already
+          // released, which this app has never treated as "upcoming"
+          // anywhere else.
+          const alreadyReleased = game && (Date.UTC(game.date[0], game.date[1], game.date[2]) / 1000) <= nowUnix;
+          if (game && !alreadyReleased) return { ...game, steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) };
+          return null;
+        }));
+        resolved.push(...batchResults);
       }
+      const games = resolved.filter(Boolean);
+      const unmatchedCount = resolved.length - games.length;
       return res.status(200).json({ games, count: games.length, unmatchedCount });
     }
 
