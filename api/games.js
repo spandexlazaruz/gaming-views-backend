@@ -791,7 +791,18 @@ module.exports = async function handler(req, res) {
       }
       const games = resolved.filter(Boolean);
       const unmatchedCount = resolved.length - games.length;
-      return res.status(200).json({ games, count: games.length, unmatchedCount });
+      // ADDED (two-way sync — removing a game from Steam should remove it
+      // from the Watchlist too): `games` deliberately excludes an
+      // already-released match (see alreadyReleased above) even though it's
+      // still genuinely on the user's Steam wishlist - the frontend needs a
+      // way to tell "this App ID is gone from games because it released" apart
+      // from "this App ID is gone from games because it's no longer
+      // wishlisted at all", or it would wrongly delete a Watchlist entry the
+      // moment it releases. `appIds` is the raw, unfiltered wishlist (every
+      // App ID currently on it, matched/unmatched/released alike) - the
+      // frontend diffs against this, not against `games`, to detect an
+      // actual removal.
+      return res.status(200).json({ games, count: games.length, unmatchedCount, wishlistedAppIds: appIds });
     }
 
     const mode = whenParam === 'last-month' ? 'last-month' : 'upcoming';
