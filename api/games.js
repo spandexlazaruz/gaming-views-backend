@@ -316,6 +316,24 @@ function trimSummary(summary) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+// ADDED (iPhone Duo / split-view wide-layout card snippet): a short,
+// card-sized snippet for the wide Calendar row's otherwise-blank space —
+// deliberately NOT the same thing as the full desc stripDetailFields
+// removes below. Same truncate-at-last-whitespace-before-the-limit
+// approach the old pre-2026-08-20 trimSummary used (see that function's
+// own comment), just revived with a much smaller limit sized for a card
+// snippet rather than a full detail-screen paragraph.
+const SHORT_DESC_LIMIT = 110;
+function trimShortDesc(summary) {
+  if (!summary) return null;
+  const trimmed = summary.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length <= SHORT_DESC_LIMIT) return trimmed;
+  const cut = trimmed.slice(0, SHORT_DESC_LIMIT);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
+
 // ADDED 2026-08-20 (game detail page enrichment): screenshots use the same
 // image_id → URL pattern as cover art (IGDB's image CDN is consistent across
 // cover/screenshot/artwork types), confirmed via IGDB's own image docs and
@@ -510,8 +528,14 @@ function mapIgdbGame(g, nowUnix) {
 // (default "upcoming" and ?when=last-month) below — the detail screen now
 // always fetches full detail via ?when=lookup (see the frontend's
 // useGameLookup), which still returns every field untouched.
-function stripDetailFields(game) {
+// `includeShortDesc` — opt-in, sent only by wide/Duo-layout requests
+// (?short_desc=1) that have real blank space to fill in a list row and
+// want a snippet for it. Default (and every narrow-phone request) stays
+// exactly as before: no desc-derived field at all, so this adds no
+// payload weight for the cold-start case the original perf fix targeted.
+function stripDetailFields(game, includeShortDesc) {
   const { desc, coverHeroUrl, screenshots, videoId, ...listGame } = game;
+  if (includeShortDesc) listGame.shortDesc = trimShortDesc(desc);
   return listGame;
 }
 
@@ -674,6 +698,7 @@ module.exports = async function handler(req, res) {
 
     const nowUnix = Math.floor(Date.now() / 1000);
     const whenParam = req.query && req.query.when;
+    const includeShortDesc = (req.query && req.query.short_desc) === '1';
 
     if (whenParam === 'lookup') {
       // ADDED (real bug found via on-device testing - "Fable" resolving to
@@ -865,7 +890,7 @@ module.exports = async function handler(req, res) {
       if (pageGames.length < PAGE_SIZE) break;
     }
 
-    const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean).map(stripDetailFields);
+    const games = rawGames.map((g) => mapIgdbGame(g, nowUnix)).filter(Boolean).map((g) => stripDetailFields(g, includeShortDesc));
 
     // Cache at the edge for an hour — release dates don't change minute to minute,
     // no need to hit IGDB fresh on every single app open.
