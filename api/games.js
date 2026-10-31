@@ -809,7 +809,21 @@ module.exports = async function handler(req, res) {
           // released, which this app has never treated as "upcoming"
           // anywhere else.
           const alreadyReleased = game && (Date.UTC(game.date[0], game.date[1], game.date[2]) / 1000) <= nowUnix;
-          if (game && !alreadyReleased) return { ...game, steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) };
+          // FIXED (real on-device report — wide-layout list rows missing the
+          // description snippet for some watchlisted titles while others had
+          // it): this branch never went through stripDetailFields below (it
+          // builds its own response shape straight from IGDB/Steam data), so
+          // shortDesc was never computed here at all, regardless of the
+          // short_desc=1 opt-in other modes honor — the detail page still
+          // showed a real description because it reads the full, un-stripped
+          // `desc` this branch always returns. Unlike stripDetailFields,
+          // always computed (no opt-in gate) — this endpoint's response is
+          // one person's wishlist (at most a few dozen items), not the full
+          // multi-thousand-game upcoming list stripDetailFields exists to
+          // keep lean, so there's no payload-size reason to gate it.
+          if (game && !alreadyReleased) {
+            return { ...game, shortDesc: trimShortDesc(game.desc), steamAppId: appId, ...(steamPrice ? { steam: steamPrice } : {}) };
+          }
           return null;
         }));
         resolved.push(...batchResults);
